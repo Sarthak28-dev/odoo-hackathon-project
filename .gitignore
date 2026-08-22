@@ -42,3 +42,11 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.pytest_cache/
+
