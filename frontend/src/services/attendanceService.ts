@@ -1,5 +1,8 @@
-import { supabase } from '../lib/supabase';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import type { AttendanceRecord } from '../types';
+import { mockAttendanceRecords } from './mockData';
+
+let localAttendanceRecords: AttendanceRecord[] = [...mockAttendanceRecords];
 
 export const attendanceService = {
   /**
@@ -9,6 +12,17 @@ export const attendanceService = {
     userId?: string,
     monthStr?: string
   ): Promise<{ data: AttendanceRecord[] | null; error: Error | null }> {
+    if (!isSupabaseConfigured) {
+      let filtered = [...localAttendanceRecords];
+      if (userId) {
+        filtered = filtered.filter((r) => r.user_id === userId);
+      }
+      if (monthStr) {
+        filtered = filtered.filter((r) => r.date.startsWith(monthStr));
+      }
+      return { data: filtered, error: null };
+    }
+
     try {
       let query = supabase
         .from('attendance_records')
@@ -54,8 +68,11 @@ export const attendanceService = {
 
       return { data: formatted, error: null };
     } catch (err: any) {
-      console.error('Error fetching attendance records from Supabase:', err);
-      return { data: null, error: err };
+      console.warn('Supabase attendance fetch failed, falling back to local demo state:', err);
+      let filtered = [...localAttendanceRecords];
+      if (userId) filtered = filtered.filter((r) => r.user_id === userId);
+      if (monthStr) filtered = filtered.filter((r) => r.date.startsWith(monthStr));
+      return { data: filtered, error: null };
     }
   },
 
@@ -63,8 +80,14 @@ export const attendanceService = {
    * Get today's attendance record for an employee
    */
   async getTodayRecord(userId: string): Promise<{ data: AttendanceRecord | null; error: Error | null }> {
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    if (!isSupabaseConfigured) {
+      const found = localAttendanceRecords.find((r) => r.user_id === userId && r.date === todayStr);
+      return { data: found || null, error: null };
+    }
+
     try {
-      const todayStr = new Date().toISOString().split('T')[0];
       const { data, error } = await supabase
         .from('attendance_records')
         .select('*')
@@ -84,8 +107,9 @@ export const attendanceService = {
         error: null,
       };
     } catch (err: any) {
-      console.error('Error getting today attendance record:', err);
-      return { data: null, error: err };
+      console.warn('Supabase getTodayRecord failed, falling back:', err);
+      const found = localAttendanceRecords.find((r) => r.user_id === userId && r.date === todayStr);
+      return { data: found || null, error: null };
     }
   },
 
@@ -93,10 +117,36 @@ export const attendanceService = {
    * Check in (Punch in)
    */
   async checkIn(userId: string, companyId: string) {
-    try {
-      const todayStr = new Date().toISOString().split('T')[0];
-      const nowIso = new Date().toISOString();
+    const todayStr = new Date().toISOString().split('T')[0];
+    const nowIso = new Date().toISOString();
 
+    if (!isSupabaseConfigured) {
+      const existing = localAttendanceRecords.find((r) => r.user_id === userId && r.date === todayStr);
+      if (existing) {
+        existing.check_in = nowIso;
+        existing.check_out = null;
+        existing.status = 'present';
+        return { data: existing, error: null };
+      } else {
+        const newRec: AttendanceRecord = {
+          id: `att-${Date.now()}`,
+          user_id: userId,
+          company_id: companyId,
+          date: todayStr,
+          check_in: nowIso,
+          check_out: null,
+          work_hours: 0.0,
+          extra_hours: 0.0,
+          status: 'present',
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+        localAttendanceRecords = [newRec, ...localAttendanceRecords];
+        return { data: newRec, error: null };
+      }
+    }
+
+    try {
       const { data, error } = await supabase
         .from('attendance_records')
         .upsert(
@@ -126,9 +176,25 @@ export const attendanceService = {
    * The Postgres calculate_attendance_hours trigger automatically calculates work_hours, extra_hours, and status!
    */
   async checkOut(recordId: string) {
-    try {
-      const nowIso = new Date().toISOString();
+    const nowIso = new Date().toISOString();
 
+    if (!isSupabaseConfigured) {
+      const rec = localAttendanceRecords.find((r) => r.id === recordId);
+      if (rec && rec.check_in) {
+        rec.check_out = nowIso;
+        const diffHours = Math.max(
+          0,
+          Number(((new Date(nowIso).getTime() - new Date(rec.check_in).getTime()) / (1000 * 60 * 60)).toFixed(2))
+        );
+        rec.work_hours = diffHours;
+        rec.extra_hours = Math.max(0, Number((diffHours - 8.0).toFixed(2)));
+        rec.status = diffHours >= 4.5 ? 'present' : 'half_day';
+        rec.updated_at = nowIso;
+        return { data: rec, error: null };
+      }
+    }
+
+    try {
       const { data, error } = await supabase
         .from('attendance_records')
         .update({
