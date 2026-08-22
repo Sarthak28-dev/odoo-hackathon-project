@@ -1,376 +1,340 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { Card } from '../components/common/Card';
-import { Badge } from '../components/common/Badge';
 import { Button } from '../components/common/Button';
-import { Modal } from '../components/common/Modal';
-import { Table, type Column } from '../components/common/Table';
-import { mockPayslips, mockSalaryStructure, mockProfiles } from '../services/mockData';
-import type { Payslip } from '../types';
-import { formatCurrency } from '../lib/utils';
+import { Tabs } from '../components/common/Tabs';
+import { LoadingState } from '../components/common/LoadingState';
+import { PayrollPeriodSelector } from '../components/payroll/PayrollPeriodSelector';
+import { PayrollSummaryCards } from '../components/payroll/PayrollSummaryCards';
+import { PayrollTable } from '../components/payroll/PayrollTable';
+import { SalaryStructure } from '../components/payroll/SalaryStructure';
+import { PayslipViewer } from '../components/payroll/PayslipViewer';
+import { SalaryStructureModal } from '../components/payroll/SalaryStructureModal';
+import {
+  fetchPayslips,
+  fetchSalaryStructure,
+  generateMonthlyPayroll,
+  updatePayslipStatus,
+} from '../services/payrollService';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import type { Payslip, SalaryStructure as SalaryStructureType, Profile, PayslipStatus } from '../types';
+import { mockProfiles } from '../services/mockData';
 import {
   DollarSign,
-  Download,
-  Eye,
-  CheckCircle2,
-  Calendar,
+  FileText,
   Layers,
+  Sparkles,
+  CheckCircle2,
+  AlertCircle,
+  Users,
 } from 'lucide-react';
 
 export const PayrollPage: React.FC = () => {
-  const { profile, role } = useAuth();
-  const [payslips, setPayslips] = useState<Payslip[]>(mockPayslips);
+  const { profile, company, role } = useAuth();
+  const isAdmin = role === 'admin';
+  const companyId = company?.id || 'c1111111-1111-1111-1111-111111111111';
+
+  // Navigation Sub-Tabs
+  const [activeViewTab, setActiveViewTab] = useState<string>('payslips');
+
+  // Selected period (default to current month, e.g. '2026-08')
+  const [selectedPeriod, setSelectedPeriod] = useState<string>(() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  });
+
+  // State
+  const [payslips, setPayslips] = useState<Payslip[]>([]);
+  const [salaryStructure, setSalaryStructure] = useState<SalaryStructureType | null>(null);
+  const [allEmployees, setAllEmployees] = useState<Profile[]>([]);
+  const [selectedEmpForSalary, setSelectedEmpForSalary] = useState<Profile | null>(null);
+
+  // Modals & UI states
   const [viewingSlip, setViewingSlip] = useState<Payslip | null>(null);
-  const [isGeneratedAlert, setIsGeneratedAlert] = useState(false);
+  const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [bannerMessage, setBannerMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const isEmployee = role === 'employee';
-
-  const displayedSlips = payslips.filter((p) => (isEmployee ? p.user_id === profile?.id : true));
-
-  const handleGeneratePayroll = () => {
-    // Generate new payslips for all active employees for current month
-    const newSlips: Payslip[] = mockProfiles.map((emp, i) => ({
-      id: `p-new-${i}`,
-      user_id: emp.id,
-      company_id: emp.company_id,
-      payroll_period: '2026-08',
-      total_working_days: 22,
-      days_present: 21,
-      paid_leaves: 1,
-      unpaid_leaves: 0,
-      absent_days: 0,
-      payable_days: 22,
-      gross_salary: 50000.0,
-      lop_deduction: 0.0,
-      pf_deduction: 3000.0,
-      pt_deduction: 200.0,
-      total_deductions: 3200.0,
-      net_salary: 46800.0,
-      status: 'finalized',
-      generated_at: new Date().toISOString(),
-      profile: {
-        first_name: emp.first_name,
-        last_name: emp.last_name,
-        emp_code: emp.emp_code,
-        login_id: emp.login_id,
-        job_position: emp.job_position,
-        department: emp.department,
-        bank_account_no: emp.bank_account_no,
-        pan_no: emp.pan_no,
-      },
-    }));
-
-    setPayslips([...newSlips, ...payslips]);
-    setIsGeneratedAlert(true);
-    setTimeout(() => setIsGeneratedAlert(false), 3000);
+  // Show banner helper
+  const showBanner = (type: 'success' | 'error', text: string) => {
+    setBannerMessage({ type, text });
+    setTimeout(() => {
+      setBannerMessage(null);
+    }, 4500);
   };
 
-  const columns: Column<Payslip>[] = [
+  // Load all company employees (for Admin dropdown)
+  useEffect(() => {
+    async function loadEmployees() {
+      if (isAdmin) {
+        if (!isSupabaseConfigured) {
+          setAllEmployees(mockProfiles);
+          setSelectedEmpForSalary(mockProfiles[1]); // Default to John Doe
+        } else {
+          const { data } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('company_id', companyId);
+          if (data && data.length > 0) {
+            setAllEmployees(data as Profile[]);
+            setSelectedEmpForSalary((data[0] as Profile) || null);
+          }
+        }
+      } else {
+        if (profile) setSelectedEmpForSalary(profile);
+      }
+    }
+    loadEmployees();
+  }, [isAdmin, companyId, profile]);
+
+  // Load payslips for selected period
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      // 1. Fetch payslips
+      const fetchedSlips = await fetchPayslips({
+        companyId,
+        payrollPeriod: selectedPeriod,
+        userId: isAdmin ? undefined : profile?.id,
+      });
+      setPayslips(fetchedSlips);
+
+      // 2. Fetch salary structure
+      const targetUserId = isAdmin
+        ? (selectedEmpForSalary?.id || profile?.id || '')
+        : (profile?.id || '');
+
+      if (targetUserId) {
+        const structure = await fetchSalaryStructure(targetUserId);
+        setSalaryStructure(structure);
+      }
+    } catch (err: unknown) {
+      console.error('Error loading payroll data:', err);
+      showBanner('error', 'Failed to load payroll data from database.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [companyId, selectedPeriod, isAdmin, profile?.id, selectedEmpForSalary?.id]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  // Trigger Payroll Generation (Authoritative Backend RPC)
+  const handleRunPayroll = async () => {
+    setIsGenerating(true);
+    try {
+      const result = await generateMonthlyPayroll(companyId, selectedPeriod);
+      if (result.success) {
+        showBanner(
+          'success',
+          result.message || `Authoritative payroll computed for ${selectedPeriod}!`
+        );
+        // Refresh payslips from database
+        await loadData();
+      } else {
+        showBanner('error', result.error || 'Failed to generate payroll.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error generating monthly payslips';
+      showBanner('error', msg);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // Update Payslip Status
+  const handleUpdateStatus = async (payslipId: string, newStatus: PayslipStatus) => {
+    try {
+      const updated = await updatePayslipStatus(payslipId, newStatus);
+      setPayslips((prev) => prev.map((p) => (p.id === payslipId ? updated : p)));
+      if (viewingSlip && viewingSlip.id === payslipId) {
+        setViewingSlip(updated);
+      }
+      showBanner('success', `Payslip status updated to ${newStatus}.`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to update payslip status';
+      showBanner('error', msg);
+    }
+  };
+
+  const navTabs = [
     {
-      header: 'Employee',
-      cell: (row) => (
-        <div>
-          <p className="font-medium text-neutral-100">
-            {row.profile?.first_name} {row.profile?.last_name}
-          </p>
-          <p className="text-[11px] font-mono text-purple-400">{row.profile?.login_id}</p>
-        </div>
-      ),
+      id: 'payslips',
+      label: isAdmin ? 'Monthly Pay Runs' : 'My Payslips',
+      icon: <FileText className="w-4 h-4" />,
+      count: payslips.length,
     },
     {
-      header: 'Period',
-      accessorKey: 'payroll_period',
-      cell: (row) => (
-        <span className="font-mono text-xs font-semibold text-neutral-200">
-          {row.payroll_period}
-        </span>
-      ),
-    },
-    {
-      header: 'Payable Days',
-      cell: (row) => (
-        <span className="text-xs text-neutral-300">
-          {row.payable_days} / {row.total_working_days} Days
-        </span>
-      ),
-    },
-    {
-      header: 'Gross Wage',
-      cell: (row) => (
-        <span className="font-mono text-xs text-neutral-300">
-          {formatCurrency(row.gross_salary)}
-        </span>
-      ),
-    },
-    {
-      header: 'Deductions (LOP+PF+PT)',
-      cell: (row) => (
-        <span className="font-mono text-xs text-rose-400">
-          - {formatCurrency(row.total_deductions)}
-        </span>
-      ),
-    },
-    {
-      header: 'Net Salary',
-      cell: (row) => (
-        <span className="font-mono font-bold text-sm text-emerald-400">
-          {formatCurrency(row.net_salary)}
-        </span>
-      ),
-    },
-    {
-      header: 'Status',
-      cell: (row) => <Badge variant={row.status} />,
-    },
-    {
-      header: 'Actions',
-      align: 'right',
-      cell: (row) => (
-        <Button
-          variant="outline"
-          size="sm"
-          leftIcon={<Eye className="w-3.5 h-3.5" />}
-          onClick={() => setViewingSlip(row)}
-          className="text-xs"
-        >
-          Salary Slip
-        </Button>
-      ),
+      id: 'structure',
+      label: isAdmin ? 'Salary Structure Manager' : 'My Salary Structure',
+      icon: <Layers className="w-4 h-4" />,
     },
   ];
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
-      {/* Header Controls */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      {/* Top Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
             Payroll & Compensation
           </h1>
           <p className="text-xs sm:text-sm text-neutral-400 mt-0.5">
-            {isEmployee
-              ? 'View monthly payslips, attendance deductions, and salary slips'
-              : 'Company-wide salary structures, attendance-linked LOP, and monthly payroll batches'}
+            {isAdmin
+              ? 'Attendance-linked payroll processing, loss-of-pay deductions, and monthly salary disbursement'
+              : 'View monthly compensation statements, attendance deductions, and salary breakdown'}
           </p>
         </div>
 
-        {role === 'admin' && (
-          <Button
-            variant="primary"
-            size="sm"
-            leftIcon={<DollarSign className="w-4 h-4" />}
-            onClick={handleGeneratePayroll}
-          >
-            Run Monthly Payroll
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <PayrollPeriodSelector
+            selectedPeriod={selectedPeriod}
+            onChange={(p) => setSelectedPeriod(p)}
+          />
+
+          {isAdmin && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                leftIcon={<Sparkles className="w-4 h-4 text-purple-400" />}
+                onClick={() => setIsConfigModalOpen(true)}
+              >
+                Configure Wage
+              </Button>
+
+              <Button
+                variant="primary"
+                size="sm"
+                leftIcon={<DollarSign className="w-4 h-4" />}
+                onClick={handleRunPayroll}
+                isLoading={isGenerating}
+              >
+                Run Monthly Payroll
+              </Button>
+            </>
+          )}
+        </div>
       </div>
 
-      {isGeneratedAlert && (
-        <div className="p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-xl flex items-center gap-2 text-xs text-emerald-300">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-          <span>Payroll generated for all active employees based on logged attendance!</span>
+      {/* Banner Feedback */}
+      {bannerMessage && (
+        <div
+          className={`p-3.5 rounded-xl border flex items-center gap-2.5 text-xs animate-in fade-in ${
+            bannerMessage.type === 'success'
+              ? 'bg-emerald-950/50 border-emerald-800/60 text-emerald-300'
+              : 'bg-rose-950/50 border-rose-800/60 text-rose-300'
+          }`}
+        >
+          {bannerMessage.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+          )}
+          <span className="font-medium">{bannerMessage.text}</span>
         </div>
       )}
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <Card hoverEffect className="p-4 flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
-            <DollarSign className="w-5 h-5" />
-          </div>
-          <div>
-            <p className="text-xs text-neutral-400 font-medium uppercase">Base Monthly Wage</p>
-            <h3 className="text-2xl font-bold text-white mt-0.5">
-              {formatCurrency(mockSalaryStructure.monthly_wage)}
-            </h3>
-          </div>
-        </Card>
+      {/* Navigation Sub-Tabs */}
+      <Tabs tabs={navTabs} activeTab={activeViewTab} onChange={setActiveViewTab} />
 
-        <Card hoverEffect className="p-4 flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-            <CheckCircle2 className="w-5 h-5" />
-          </div>
-          <div>
-            <p className="text-xs text-neutral-400 font-medium uppercase">Net In-Hand Average</p>
-            <h3 className="text-2xl font-bold text-emerald-400 mt-0.5">
-              {formatCurrency(46800.0)}
-            </h3>
-          </div>
-        </Card>
+      {/* Tab 1: Monthly Payslips View */}
+      {activeViewTab === 'payslips' && (
+        <div className="space-y-6">
+          {/* Summary KPIs */}
+          <PayrollSummaryCards payslips={payslips} isLoading={isLoading} />
 
-        <Card hoverEffect className="p-4 flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-sky-500/10 text-sky-400 border border-sky-500/20">
-            <Calendar className="w-5 h-5" />
-          </div>
-          <div>
-            <p className="text-xs text-neutral-400 font-medium uppercase">Pay Day Cycle</p>
-            <h3 className="text-2xl font-bold text-sky-400 mt-0.5">Monthly (Last Day)</h3>
-          </div>
-        </Card>
-      </div>
+          {/* Payslips Table */}
+          {isLoading ? (
+            <LoadingState message="Loading monthly payslips from database..." />
+          ) : (
+            <PayrollTable
+              payslips={payslips}
+              isAdmin={isAdmin}
+              onViewSlip={(slip) => setViewingSlip(slip)}
+              onUpdateStatus={handleUpdateStatus}
+            />
+          )}
+        </div>
+      )}
 
-      {/* Payslips Table */}
-      <Table
-        columns={columns}
-        data={displayedSlips}
-        keyExtractor={(row) => row.id}
-        emptyMessage="No payslip records generated yet."
-      />
+      {/* Tab 2: Salary Structure View */}
+      {activeViewTab === 'structure' && (
+        <div className="space-y-6">
+          {isAdmin && allEmployees.length > 0 && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-neutral-900/80 border border-neutral-800 rounded-xl">
+              <div className="flex items-center gap-2 text-neutral-300 text-xs font-semibold uppercase tracking-wider">
+                <Users className="w-4 h-4 text-purple-400" />
+                <span>Select Employee to Inspect:</span>
+              </div>
+              <select
+                value={selectedEmpForSalary?.id || ''}
+                onChange={async (e) => {
+                  const emp = allEmployees.find((p) => p.id === e.target.value) || null;
+                  setSelectedEmpForSalary(emp);
+                  if (emp) {
+                    const st = await fetchSalaryStructure(emp.id);
+                    setSalaryStructure(st);
+                  }
+                }}
+                className="bg-neutral-950 text-white text-xs font-medium px-3 py-2 rounded-lg border border-neutral-700 focus:outline-none focus:border-purple-500 cursor-pointer"
+              >
+                {allEmployees.map((emp) => (
+                  <option key={emp.id} value={emp.id} className="bg-neutral-900 text-white">
+                    {emp.first_name} {emp.last_name} ({emp.login_id}) — {emp.department || 'General'}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
-      {/* SALARY SLIP POPUP MODAL (Matching PRD & Wireframe specs) */}
-      <Modal
+          {isLoading ? (
+            <LoadingState message="Loading salary structure..." />
+          ) : (
+            <SalaryStructure
+              salaryStructure={salaryStructure}
+              employee={isAdmin ? selectedEmpForSalary : profile}
+              isAdmin={isAdmin}
+              companyId={companyId}
+              onStructureUpdated={(saved) => {
+                setSalaryStructure(saved);
+                showBanner('success', 'Salary structure saved and computed successfully.');
+              }}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Payslip Viewer Modal */}
+      <PayslipViewer
         isOpen={Boolean(viewingSlip)}
         onClose={() => setViewingSlip(null)}
-        title="Official Payslip / Salary Slip"
-        description="Generated compensation and attendance statement."
-        size="xl"
-        footer={
-          <div className="flex items-center justify-between w-full">
-            <span className="text-xs font-mono text-neutral-500">
-              Slip ID: {viewingSlip?.id}
-            </span>
-            <Button
-              variant="primary"
-              size="sm"
-              leftIcon={<Download className="w-4 h-4" />}
-              onClick={() => alert('Salary Slip PDF downloaded!')}
-            >
-              Download PDF
-            </Button>
-          </div>
-        }
-      >
-        {viewingSlip && (
-          <div className="p-4 bg-neutral-950 border border-neutral-800 rounded-xl space-y-6 text-neutral-200">
-            {/* Payslip Header */}
-            <div className="flex items-start justify-between border-b border-neutral-800 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-purple-600 flex items-center justify-center text-white">
-                  <Layers className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-base text-white">Odoo India Pvt Ltd</h3>
-                  <p className="text-xs text-neutral-400">Payroll Period: {viewingSlip.payroll_period}</p>
-                </div>
-              </div>
-              <Badge variant={viewingSlip.status} />
-            </div>
+        payslip={viewingSlip}
+        companyName={company?.name || 'Dayflow Organization'}
+        isAdmin={isAdmin}
+        onStatusUpdated={(updated) => {
+          setViewingSlip(updated);
+          setPayslips((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+          showBanner('success', `Payslip marked as ${updated.status}.`);
+        }}
+      />
 
-            {/* Employee Details Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs">
-              <div>
-                <p className="text-neutral-500">Employee Name</p>
-                <p className="font-semibold text-white mt-0.5">
-                  {viewingSlip.profile?.first_name} {viewingSlip.profile?.last_name}
-                </p>
-              </div>
-              <div>
-                <p className="text-neutral-500">Login / Employee ID</p>
-                <p className="font-mono text-purple-300 mt-0.5">{viewingSlip.profile?.login_id}</p>
-              </div>
-              <div>
-                <p className="text-neutral-500">Designation</p>
-                <p className="text-neutral-300 mt-0.5">{viewingSlip.profile?.job_position || 'Engineer'}</p>
-              </div>
-              <div>
-                <p className="text-neutral-500">Bank Account</p>
-                <p className="font-mono text-neutral-300 mt-0.5">
-                  {viewingSlip.profile?.bank_account_no || '••••••••1928'}
-                </p>
-              </div>
-              <div>
-                <p className="text-neutral-500">PAN Number</p>
-                <p className="font-mono text-neutral-300 mt-0.5">{viewingSlip.profile?.pan_no || 'ABCDE1234F'}</p>
-              </div>
-              <div>
-                <p className="text-neutral-500">Payable Days</p>
-                <p className="font-semibold text-emerald-400 mt-0.5">
-                  {viewingSlip.payable_days} / {viewingSlip.total_working_days} Days
-                </p>
-              </div>
-            </div>
-
-            {/* Earnings vs Deductions Table */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs pt-2">
-              {/* Earnings Column */}
-              <div className="bg-neutral-900/60 p-3.5 rounded-lg border border-neutral-800 space-y-2">
-                <p className="font-semibold text-neutral-300 uppercase tracking-wider pb-1 border-b border-neutral-800">
-                  Earnings Breakdown
-                </p>
-                <div className="flex justify-between">
-                  <span>Basic Salary</span>
-                  <span className="font-mono">₹25,000.00</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>House Rent Allowance (HRA)</span>
-                  <span className="font-mono">₹12,500.00</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Standard Allowance</span>
-                  <span className="font-mono">₹4,167.00</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Performance Bonus</span>
-                  <span className="font-mono">₹2,082.50</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Leave Travel Allowance</span>
-                  <span className="font-mono">₹2,082.50</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Fixed Allowance</span>
-                  <span className="font-mono">₹4,168.00</span>
-                </div>
-                <div className="flex justify-between pt-2 border-t border-neutral-800 font-bold text-white">
-                  <span>Gross Total Earnings</span>
-                  <span className="font-mono">{formatCurrency(viewingSlip.gross_salary)}</span>
-                </div>
-              </div>
-
-              {/* Deductions Column */}
-              <div className="bg-neutral-900/60 p-3.5 rounded-lg border border-neutral-800 space-y-2">
-                <p className="font-semibold text-neutral-300 uppercase tracking-wider pb-1 border-b border-neutral-800">
-                  Deductions Breakdown
-                </p>
-                <div className="flex justify-between text-neutral-400">
-                  <span>Loss of Pay (Unpaid Leave / Absent)</span>
-                  <span className="font-mono text-rose-400">
-                    - {formatCurrency(viewingSlip.lop_deduction)}
-                  </span>
-                </div>
-                <div className="flex justify-between text-neutral-400">
-                  <span>Employee PF (12%)</span>
-                  <span className="font-mono text-rose-400">
-                    - {formatCurrency(viewingSlip.pf_deduction)}
-                  </span>
-                </div>
-                <div className="flex justify-between text-neutral-400">
-                  <span>Professional Tax (PT)</span>
-                  <span className="font-mono text-rose-400">
-                    - {formatCurrency(viewingSlip.pt_deduction)}
-                  </span>
-                </div>
-                <div className="flex justify-between pt-8 border-t border-neutral-800 font-bold text-rose-300">
-                  <span>Total Deductions</span>
-                  <span className="font-mono">- {formatCurrency(viewingSlip.total_deductions)}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Net Salary Summary */}
-            <div className="p-4 bg-emerald-950/30 border border-emerald-800/40 rounded-xl flex items-center justify-between">
-              <div>
-                <p className="text-xs text-neutral-400 font-medium">NET SALARY PAYABLE</p>
-                <p className="text-xs text-emerald-500/80">Transferred to registered bank account</p>
-              </div>
-              <span className="text-xl font-bold font-mono text-emerald-400">
-                {formatCurrency(viewingSlip.net_salary)}
-              </span>
-            </div>
-          </div>
-        )}
-      </Modal>
+      {/* Global Salary Structure Config Modal */}
+      <SalaryStructureModal
+        isOpen={isConfigModalOpen}
+        onClose={() => setIsConfigModalOpen(false)}
+        companyId={companyId}
+        allEmployees={allEmployees}
+        employee={selectedEmpForSalary}
+        initialStructure={salaryStructure}
+        onSuccess={(saved) => {
+          setSalaryStructure(saved);
+          showBanner('success', 'Salary structure updated successfully.');
+        }}
+      />
     </div>
   );
 };
