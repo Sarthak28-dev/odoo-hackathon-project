@@ -12,7 +12,7 @@ export interface Column<T> {
 interface TableProps<T> {
   columns: Column<T>[];
   data: T[];
-  keyExtractor: (item: T, index: number) => string | number;
+  keyExtractor?: (item: T, index: number) => string | number;
   emptyMessage?: string;
   isLoading?: boolean;
   className?: string;
@@ -21,7 +21,7 @@ interface TableProps<T> {
 export function Table<T>({
   columns,
   data,
-  keyExtractor,
+  keyExtractor = (item: any, idx: number) => item?.id ?? idx,
   emptyMessage = 'No records found.',
   isLoading = false,
   className,

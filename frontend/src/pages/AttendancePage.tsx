@@ -343,6 +343,7 @@ export const AttendancePage: React.FC = () => {
           <Table
             columns={isEmployee ? employeeColumns : adminColumns}
             data={displayedRecords}
+            keyExtractor={(r) => r.id}
           />
         )}
       </Card>

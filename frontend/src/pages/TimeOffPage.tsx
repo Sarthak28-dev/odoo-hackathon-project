@@ -341,7 +341,7 @@ export const TimeOffPage: React.FC = () => {
             onAction={() => setIsApplyModalOpen(true)}
           />
         ) : (
-          <Table columns={leaveColumns} data={leaves} />
+          <Table columns={leaveColumns} data={leaves} keyExtractor={(l) => l.id} />
         )}
       </Card>
 
