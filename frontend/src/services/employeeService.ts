@@ -2,8 +2,6 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import type { Profile, PresenceIndicator } from '../types';
 import { mockProfiles, mockSalaryStructure } from './mockData';
 
-let localEmployees: Profile[] = [...mockProfiles];
-
 export interface CreateEmployeePayload {
   email: string;
   password?: string;
@@ -18,14 +16,18 @@ export interface CreateEmployeePayload {
   date_of_joining?: string;
 }
 
+// In-memory cache for offline demo mode
+let localProfiles: Profile[] = [...mockProfiles];
+
 export const employeeService = {
   /**
    * Fetch all employee profiles in the organization (RLS enforced)
    */
   async getEmployees(): Promise<{ data: Profile[] | null; error: Error | null }> {
     if (!isSupabaseConfigured) {
-      return { data: localEmployees, error: null };
+      return { data: localProfiles, error: null };
     }
+
     try {
       const { data, error } = await supabase
         .from('profiles')
@@ -36,7 +38,7 @@ export const employeeService = {
       return { data: (data as Profile[]) || [], error: null };
     } catch (err: any) {
       console.warn('Supabase fetch failed, falling back to local state:', err);
-      return { data: localEmployees, error: null };
+      return { data: localProfiles, error: null };
     }
   },
 
@@ -46,13 +48,14 @@ export const employeeService = {
   async getTodayPresenceMap(): Promise<Record<string, PresenceIndicator>> {
     if (!isSupabaseConfigured) {
       return {
-        'u1': 'present',
-        'u2': 'present',
-        'u3': 'on_leave',
-        'u4': 'absent',
-        'u5': 'present',
+        'u1111111-1111-1111-1111-111111111111': 'present',
+        'u2222222-2222-2222-2222-222222222222': 'present',
+        'u3333333-3333-3333-3333-333333333333': 'present',
+        'u4444444-4444-4444-4444-444444444444': 'on_leave',
+        'u5555555-5555-5555-5555-555555555555': 'absent',
       };
     }
+
     try {
       const todayStr = new Date().toISOString().split('T')[0];
       const { data, error } = await supabase
@@ -60,7 +63,7 @@ export const employeeService = {
         .select('user_id, status, check_in, check_out')
         .eq('date', todayStr);
 
-      if (error || !data) return { 'u1': 'present', 'u2': 'present', 'u3': 'on_leave' };
+      if (error || !data) return {};
 
       const map: Record<string, PresenceIndicator> = {};
       data.forEach((rec) => {
@@ -76,8 +79,8 @@ export const employeeService = {
       });
       return map;
     } catch (err) {
-      console.warn('Error fetching presence map, falling back:', err);
-      return { 'u1': 'present', 'u2': 'present', 'u3': 'on_leave' };
+      console.warn('Error fetching presence map:', err);
+      return {};
     }
   },
 
@@ -86,9 +89,10 @@ export const employeeService = {
    */
   async getProfileById(userId: string): Promise<{ data: Profile | null; error: Error | null }> {
     if (!isSupabaseConfigured) {
-      const found = localEmployees.find((p) => p.id === userId) || localEmployees[0];
-      return { data: found, error: null };
+      const found = localProfiles.find((p) => p.id === userId) || localProfiles[0];
+      return { data: found || null, error: null };
     }
+
     try {
       const { data, error } = await supabase
         .from('profiles')
@@ -99,9 +103,9 @@ export const employeeService = {
       if (error) throw error;
       return { data: data as Profile, error: null };
     } catch (err: any) {
-      console.warn('Error fetching profile from Supabase, falling back:', err);
-      const found = localEmployees.find((p) => p.id === userId) || localEmployees[0];
-      return { data: found, error: null };
+      console.warn('Error fetching profile from Supabase, using local fallback:', err);
+      const found = localProfiles.find((p) => p.id === userId) || localProfiles[0];
+      return { data: found || null, error: null };
     }
   },
 
@@ -110,26 +114,28 @@ export const employeeService = {
    */
   async createEmployee(payload: CreateEmployeePayload) {
     if (!isSupabaseConfigured) {
-      const newId = `u${localEmployees.length + 1}`;
-      const loginId = `EMP-${String(localEmployees.length + 1).padStart(3, '0')}`;
-      const newEmp: Profile = {
+      const newId = `u-${Date.now()}`;
+      const generatedLoginId = `OI${payload.first_name.slice(0, 2).toUpperCase()}${payload.last_name.slice(0, 2).toUpperCase()}${new Date().getFullYear()}00${localProfiles.length + 1}`;
+      const tempPass = payload.password || `TempPass@${Math.floor(1000 + Math.random() * 9000)}`;
+
+      const newProf: Profile = {
         id: newId,
-        company_id: 'c1',
+        company_id: localProfiles[0]?.company_id || 'c1111111-1111-1111-1111-111111111111',
         role: 'employee',
-        login_id: loginId,
+        login_id: generatedLoginId,
         first_name: payload.first_name,
         last_name: payload.last_name,
         email: payload.email,
         phone: payload.phone || null,
-        job_position: payload.job_position || 'Software Engineer',
-        department: payload.department || 'Engineering',
-        manager_name: payload.manager_name || 'Mithilesh Kumar',
-        location: payload.location || 'Bangalore, India',
+        job_position: payload.job_position || 'Associate',
+        department: payload.department || 'General',
+        manager_name: payload.manager_name || 'HR Team',
+        location: payload.location || 'Bangalore HQ',
         avatar_url: null,
         about: null,
         job_love: null,
         hobbies: null,
-        skills: ['React', 'TypeScript'],
+        skills: [],
         certifications: [],
         date_of_birth: null,
         residential_address: null,
@@ -143,23 +149,26 @@ export const employeeService = {
         ifsc_code: null,
         pan_no: null,
         uan_no: null,
-        emp_code: loginId,
+        emp_code: `EMP-00${localProfiles.length + 1}`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
-      localEmployees = [newEmp, ...localEmployees];
+
+      localProfiles = [newProf, ...localProfiles];
       return {
         data: {
           user: {
             id: newId,
             email: payload.email,
-            login_id: loginId,
-            temporary_password: 'TempPassword123!',
+            login_id: generatedLoginId,
+            temporary_password: tempPass,
+            profile: newProf,
           },
         },
         error: null,
       };
     }
+
     try {
       const { data, error } = await supabase.functions.invoke('create-employee', {
         body: payload,
@@ -187,11 +196,10 @@ export const employeeService = {
     }
   ): Promise<{ error: Error | null }> {
     if (!isSupabaseConfigured) {
-      localEmployees = localEmployees.map((p) =>
-        p.id === userId ? { ...p, ...updates, updated_at: new Date().toISOString() } : p
-      );
+      localProfiles = localProfiles.map((p) => (p.id === userId ? { ...p, ...updates } : p));
       return { error: null };
     }
+
     try {
       const { error } = await supabase
         .from('profiles')
@@ -210,7 +218,7 @@ export const employeeService = {
   },
 
   /**
-   * Update Private Info tab information (Personal, contact, statutory & bank details)
+   * Update Private Info tab information
    */
   async updatePrivateInfo(
     userId: string,
@@ -231,11 +239,10 @@ export const employeeService = {
     }
   ): Promise<{ error: Error | null }> {
     if (!isSupabaseConfigured) {
-      localEmployees = localEmployees.map((p) =>
-        p.id === userId ? { ...p, ...updates, updated_at: new Date().toISOString() } : p
-      );
+      localProfiles = localProfiles.map((p) => (p.id === userId ? { ...p, ...updates } : p));
       return { error: null };
     }
+
     try {
       const { error } = await supabase
         .from('profiles')
@@ -260,6 +267,7 @@ export const employeeService = {
     if (!isSupabaseConfigured) {
       return { data: { ...mockSalaryStructure, user_id: userId }, error: null };
     }
+
     try {
       const { data, error } = await supabase
         .from('salary_structures')
@@ -268,9 +276,9 @@ export const employeeService = {
         .maybeSingle();
 
       if (error) throw error;
-      return { data: data || { ...mockSalaryStructure, user_id: userId }, error: null };
+      return { data, error: null };
     } catch (err: any) {
-      console.warn('Error fetching salary structure from Supabase, falling back:', err);
+      console.error('Error fetching salary structure from Supabase:', err);
       return { data: { ...mockSalaryStructure, user_id: userId }, error: null };
     }
   },
@@ -280,16 +288,9 @@ export const employeeService = {
    */
   async updateSalaryStructure(userId: string, companyId: string, monthlyWage: number) {
     if (!isSupabaseConfigured) {
-      return {
-        data: {
-          ...mockSalaryStructure,
-          user_id: userId,
-          monthly_wage: monthlyWage,
-          updated_at: new Date().toISOString(),
-        },
-        error: null,
-      };
+      return { data: { ...mockSalaryStructure, monthly_wage: monthlyWage, user_id: userId }, error: null };
     }
+
     try {
       const { data, error } = await supabase
         .from('salary_structures')
@@ -319,11 +320,10 @@ export const employeeService = {
   async uploadAvatar(userId: string, file: File): Promise<{ publicUrl: string | null; error: Error | null }> {
     if (!isSupabaseConfigured) {
       const fakeUrl = URL.createObjectURL(file);
-      localEmployees = localEmployees.map((p) =>
-        p.id === userId ? { ...p, avatar_url: fakeUrl } : p
-      );
+      localProfiles = localProfiles.map((p) => (p.id === userId ? { ...p, avatar_url: fakeUrl } : p));
       return { publicUrl: fakeUrl, error: null };
     }
+
     try {
       const fileExt = file.name.split('.').pop();
       const filePath = `${userId}/avatar-${Date.now()}.${fileExt}`;

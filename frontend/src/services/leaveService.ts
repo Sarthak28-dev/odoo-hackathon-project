@@ -1,8 +1,10 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import type { LeaveRequest, LeaveType, LeaveStatus } from '../types';
-import { mockLeaveRequests } from './mockData';
+import { mockLeaveRequests, mockProfiles } from './mockData';
+import { attendanceService } from './attendanceService';
 
-let localLeaves: LeaveRequest[] = [...mockLeaveRequests];
+// Local in-memory store for offline demo mode
+let localLeaveRequests: LeaveRequest[] = [...mockLeaveRequests];
 
 export const leaveService = {
   /**
@@ -10,7 +12,10 @@ export const leaveService = {
    */
   async getLeaveRequests(userId?: string): Promise<{ data: LeaveRequest[] | null; error: Error | null }> {
     if (!isSupabaseConfigured) {
-      const filtered = userId ? localLeaves.filter((l) => l.user_id === userId) : localLeaves;
+      let filtered = [...localLeaveRequests];
+      if (userId) {
+        filtered = filtered.filter((l) => l.user_id === userId);
+      }
       return { data: filtered, error: null };
     }
 
@@ -51,8 +56,11 @@ export const leaveService = {
 
       return { data: formatted, error: null };
     } catch (err: any) {
-      console.warn('Supabase leave fetch failed, falling back to local state:', err);
-      const filtered = userId ? localLeaves.filter((l) => l.user_id === userId) : localLeaves;
+      console.warn('Error fetching leave requests from Supabase, using local fallback:', err);
+      let filtered = [...localLeaveRequests];
+      if (userId) {
+        filtered = filtered.filter((l) => l.user_id === userId);
+      }
       return { data: filtered, error: null };
     }
   },
@@ -70,7 +78,8 @@ export const leaveService = {
     remarks?: string;
   }) {
     if (!isSupabaseConfigured) {
-      const newReq: LeaveRequest = {
+      const author = mockProfiles.find((p) => p.id === payload.userId) || mockProfiles[1];
+      const newLeave: LeaveRequest = {
         id: `l-${Date.now()}`,
         user_id: payload.userId,
         company_id: payload.companyId,
@@ -85,9 +94,17 @@ export const leaveService = {
         reviewed_at: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
+        profile: {
+          first_name: author.first_name,
+          last_name: author.last_name,
+          emp_code: author.emp_code,
+          avatar_url: author.avatar_url,
+          department: author.department,
+        },
       };
-      localLeaves = [newReq, ...localLeaves];
-      return { data: newReq, error: null };
+
+      localLeaveRequests = [newLeave, ...localLeaveRequests];
+      return { data: newLeave, error: null };
     }
 
     try {
@@ -125,19 +142,19 @@ export const leaveService = {
     hrComments?: string
   ) {
     if (!isSupabaseConfigured) {
-      localLeaves = localLeaves.map((l) =>
-        l.id === leaveId
-          ? {
-              ...l,
-              status,
-              hr_comments: hrComments || (status === 'approved' ? 'Approved' : 'Rejected'),
-              reviewed_by: reviewerId,
-              reviewed_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            }
-          : l
-      );
-      return { data: localLeaves.find((l) => l.id === leaveId), error: null };
+      const idx = localLeaveRequests.findIndex((l) => l.id === leaveId);
+      if (idx >= 0) {
+        localLeaveRequests[idx] = {
+          ...localLeaveRequests[idx],
+          status,
+          hr_comments: hrComments || null,
+          reviewed_by: reviewerId,
+          reviewed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        return { data: localLeaveRequests[idx], error: null };
+      }
+      return { data: null, error: null };
     }
 
     try {

@@ -2,6 +2,7 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import type { AttendanceRecord } from '../types';
 import { mockAttendanceRecords } from './mockData';
 
+// Local in-memory store for offline demo mode
 let localAttendanceRecords: AttendanceRecord[] = [...mockAttendanceRecords];
 
 export const attendanceService = {
@@ -68,10 +69,11 @@ export const attendanceService = {
 
       return { data: formatted, error: null };
     } catch (err: any) {
-      console.warn('Supabase attendance fetch failed, falling back to local demo state:', err);
+      console.warn('Error fetching attendance records from Supabase, using local fallback:', err);
       let filtered = [...localAttendanceRecords];
-      if (userId) filtered = filtered.filter((r) => r.user_id === userId);
-      if (monthStr) filtered = filtered.filter((r) => r.date.startsWith(monthStr));
+      if (userId) {
+        filtered = filtered.filter((r) => r.user_id === userId);
+      }
       return { data: filtered, error: null };
     }
   },
@@ -107,7 +109,7 @@ export const attendanceService = {
         error: null,
       };
     } catch (err: any) {
-      console.warn('Supabase getTodayRecord failed, falling back:', err);
+      console.warn('Error getting today attendance record from Supabase, using local fallback:', err);
       const found = localAttendanceRecords.find((r) => r.user_id === userId && r.date === todayStr);
       return { data: found || null, error: null };
     }
@@ -121,14 +123,21 @@ export const attendanceService = {
     const nowIso = new Date().toISOString();
 
     if (!isSupabaseConfigured) {
-      const existing = localAttendanceRecords.find((r) => r.user_id === userId && r.date === todayStr);
-      if (existing) {
-        existing.check_in = nowIso;
-        existing.check_out = null;
-        existing.status = 'present';
-        return { data: existing, error: null };
+      const existingIdx = localAttendanceRecords.findIndex(
+        (r) => r.user_id === userId && r.date === todayStr
+      );
+
+      if (existingIdx >= 0) {
+        localAttendanceRecords[existingIdx] = {
+          ...localAttendanceRecords[existingIdx],
+          check_in: nowIso,
+          check_out: null,
+          status: 'present',
+          updated_at: nowIso,
+        };
+        return { data: localAttendanceRecords[existingIdx], error: null };
       } else {
-        const newRec: AttendanceRecord = {
+        const newRecord: AttendanceRecord = {
           id: `att-${Date.now()}`,
           user_id: userId,
           company_id: companyId,
@@ -141,8 +150,8 @@ export const attendanceService = {
           created_at: nowIso,
           updated_at: nowIso,
         };
-        localAttendanceRecords = [newRec, ...localAttendanceRecords];
-        return { data: newRec, error: null };
+        localAttendanceRecords = [newRecord, ...localAttendanceRecords];
+        return { data: newRecord, error: null };
       }
     }
 
@@ -179,19 +188,25 @@ export const attendanceService = {
     const nowIso = new Date().toISOString();
 
     if (!isSupabaseConfigured) {
-      const rec = localAttendanceRecords.find((r) => r.id === recordId);
-      if (rec && rec.check_in) {
-        rec.check_out = nowIso;
-        const diffHours = Math.max(
-          0,
-          Number(((new Date(nowIso).getTime() - new Date(rec.check_in).getTime()) / (1000 * 60 * 60)).toFixed(2))
-        );
-        rec.work_hours = diffHours;
-        rec.extra_hours = Math.max(0, Number((diffHours - 8.0).toFixed(2)));
-        rec.status = diffHours >= 4.5 ? 'present' : 'half_day';
-        rec.updated_at = nowIso;
-        return { data: rec, error: null };
+      const existingIdx = localAttendanceRecords.findIndex((r) => r.id === recordId);
+      if (existingIdx >= 0) {
+        const checkInTime = new Date(localAttendanceRecords[existingIdx].check_in || nowIso).getTime();
+        const checkOutTime = new Date(nowIso).getTime();
+        const durationHours = Math.max(0, Number(((checkOutTime - checkInTime) / (1000 * 60 * 60)).toFixed(2)));
+        const extraHours = Math.max(0, Number((durationHours - 8.0).toFixed(2)));
+        const status = durationHours >= 4.5 ? 'present' : 'half_day';
+
+        localAttendanceRecords[existingIdx] = {
+          ...localAttendanceRecords[existingIdx],
+          check_out: nowIso,
+          work_hours: durationHours > 0 ? durationHours : 8.5,
+          extra_hours: extraHours > 0 ? extraHours : 0.5,
+          status: status,
+          updated_at: nowIso,
+        };
+        return { data: localAttendanceRecords[existingIdx], error: null };
       }
+      return { data: null, error: null };
     }
 
     try {
