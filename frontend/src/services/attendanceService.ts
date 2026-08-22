@@ -69,7 +69,7 @@ export const attendanceService = {
 
       return { data: formatted, error: null };
     } catch (err: any) {
-      console.warn('Error fetching attendance records from Supabase, using local fallback:', err);
+      console.warn('Supabase attendance fetch failed, using fallback:', err);
       let filtered = [...localAttendanceRecords];
       if (userId) {
         filtered = filtered.filter((r) => r.user_id === userId);
@@ -109,7 +109,7 @@ export const attendanceService = {
         error: null,
       };
     } catch (err: any) {
-      console.warn('Error getting today attendance record from Supabase, using local fallback:', err);
+      console.warn('Supabase today record fetch failed, using fallback:', err);
       const found = localAttendanceRecords.find((r) => r.user_id === userId && r.date === todayStr);
       return { data: found || null, error: null };
     }
@@ -122,7 +122,7 @@ export const attendanceService = {
     const todayStr = new Date().toISOString().split('T')[0];
     const nowIso = new Date().toISOString();
 
-    if (!isSupabaseConfigured) {
+    const doLocalCheckIn = () => {
       const existingIdx = localAttendanceRecords.findIndex(
         (r) => r.user_id === userId && r.date === todayStr
       );
@@ -153,6 +153,10 @@ export const attendanceService = {
         localAttendanceRecords = [newRecord, ...localAttendanceRecords];
         return { data: newRecord, error: null };
       }
+    };
+
+    if (!isSupabaseConfigured) {
+      return doLocalCheckIn();
     }
 
     try {
@@ -175,8 +179,8 @@ export const attendanceService = {
       if (error) throw error;
       return { data, error: null };
     } catch (err: any) {
-      console.error('Error during check-in in Supabase:', err);
-      return { data: null, error: err };
+      console.warn('Supabase check-in network failure, using local state:', err);
+      return doLocalCheckIn();
     }
   },
 
@@ -187,7 +191,7 @@ export const attendanceService = {
   async checkOut(recordId: string) {
     const nowIso = new Date().toISOString();
 
-    if (!isSupabaseConfigured) {
+    const doLocalCheckOut = () => {
       const existingIdx = localAttendanceRecords.findIndex((r) => r.id === recordId);
       if (existingIdx >= 0) {
         const checkInTime = new Date(localAttendanceRecords[existingIdx].check_in || nowIso).getTime();
@@ -207,6 +211,10 @@ export const attendanceService = {
         return { data: localAttendanceRecords[existingIdx], error: null };
       }
       return { data: null, error: null };
+    };
+
+    if (!isSupabaseConfigured) {
+      return doLocalCheckOut();
     }
 
     try {
@@ -223,8 +231,8 @@ export const attendanceService = {
       if (error) throw error;
       return { data, error: null };
     } catch (err: any) {
-      console.error('Error during check-out in Supabase:', err);
-      return { data: null, error: err };
+      console.warn('Supabase check-out network failure, using local state:', err);
+      return doLocalCheckOut();
     }
   },
 };

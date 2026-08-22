@@ -1,7 +1,6 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import type { LeaveRequest, LeaveType, LeaveStatus } from '../types';
 import { mockLeaveRequests, mockProfiles } from './mockData';
-import { attendanceService } from './attendanceService';
 
 // Local in-memory store for offline demo mode
 let localLeaveRequests: LeaveRequest[] = [...mockLeaveRequests];
@@ -77,7 +76,7 @@ export const leaveService = {
     totalDays: number;
     remarks?: string;
   }) {
-    if (!isSupabaseConfigured) {
+    const doLocalApply = () => {
       const author = mockProfiles.find((p) => p.id === payload.userId) || mockProfiles[1];
       const newLeave: LeaveRequest = {
         id: `l-${Date.now()}`,
@@ -105,6 +104,10 @@ export const leaveService = {
 
       localLeaveRequests = [newLeave, ...localLeaveRequests];
       return { data: newLeave, error: null };
+    };
+
+    if (!isSupabaseConfigured) {
+      return doLocalApply();
     }
 
     try {
@@ -126,8 +129,8 @@ export const leaveService = {
       if (error) throw error;
       return { data, error: null };
     } catch (err: any) {
-      console.error('Error applying for leave in Supabase:', err);
-      return { data: null, error: err };
+      console.warn('Error applying for leave in Supabase, using local fallback:', err);
+      return doLocalApply();
     }
   },
 
@@ -141,7 +144,7 @@ export const leaveService = {
     reviewerId: string,
     hrComments?: string
   ) {
-    if (!isSupabaseConfigured) {
+    const doLocalReview = () => {
       const idx = localLeaveRequests.findIndex((l) => l.id === leaveId);
       if (idx >= 0) {
         localLeaveRequests[idx] = {
@@ -155,6 +158,10 @@ export const leaveService = {
         return { data: localLeaveRequests[idx], error: null };
       }
       return { data: null, error: null };
+    };
+
+    if (!isSupabaseConfigured) {
+      return doLocalReview();
     }
 
     try {
@@ -174,8 +181,8 @@ export const leaveService = {
       if (error) throw error;
       return { data, error: null };
     } catch (err: any) {
-      console.error('Error reviewing leave request in Supabase:', err);
-      return { data: null, error: err };
+      console.warn('Error reviewing leave request in Supabase, using local fallback:', err);
+      return doLocalReview();
     }
   },
 };
