@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useAttendance } from '../contexts/AttendanceContext';
 import { Card } from '../components/common/Card';
 import { Badge } from '../components/common/Badge';
 import { Avatar } from '../components/common/Avatar';
@@ -8,34 +9,68 @@ import { Input } from '../components/common/Input';
 import { Select } from '../components/common/Select';
 import { Modal } from '../components/common/Modal';
 import { Table, type Column } from '../components/common/Table';
-import { mockLeaveRequests } from '../services/mockData';
-import type { LeaveRequest, LeaveType } from '../types';
+import { LoadingState } from '../components/common/LoadingState';
+import { EmptyState } from '../components/common/EmptyState';
+import { ErrorState } from '../components/common/ErrorState';
+import { leaveService } from '../services/leaveService';
+import type { LeaveRequest, LeaveType, LeaveStatus } from '../types';
 import { formatDate } from '../lib/utils';
-import { Plus, Check, X, Plane, Calendar, MessageSquare, AlertCircle } from 'lucide-react';
+import { Plus, Check, X, Plane, Calendar, MessageSquare, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 export const TimeOffPage: React.FC = () => {
   const { profile, role } = useAuth();
-  const [leaves, setLeaves] = useState<LeaveRequest[]>(mockLeaveRequests);
-  const [isApplyModalOpen, setIsApplyModalOpen] = useState(false);
+  const { refreshAttendance } = useAttendance();
+
+  const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Apply Leave Form State
+  const [isApplyModalOpen, setIsApplyModalOpen] = useState(false);
   const [leaveType, setLeaveType] = useState<LeaveType>('paid');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [remarks, setRemarks] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   // HR Review Modal State
   const [reviewModalRequest, setReviewModalRequest] = useState<LeaveRequest | null>(null);
   const [hrComment, setHrComment] = useState('');
+  const [isReviewing, setIsReviewing] = useState(false);
+  const [successBanner, setSuccessBanner] = useState<string | null>(null);
 
   const isEmployee = role === 'employee';
 
-  const displayedLeaves = leaves.filter((l) => (isEmployee ? l.user_id === profile?.id : true));
+  const fetchLeaves = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const targetUserId = isEmployee ? profile?.id : undefined;
+      const { data, error: fetchErr } = await leaveService.getLeaveRequests(targetUserId);
+      if (fetchErr) throw fetchErr;
+      setLeaves(data || []);
+    } catch (err: any) {
+      console.error('Failed to fetch leave requests:', err);
+      setError(err.message || 'Unable to retrieve leave requests from Supabase.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isEmployee, profile?.id]);
 
-  const handleApplyLeave = (e: React.FormEvent) => {
+  useEffect(() => {
+    fetchLeaves();
+  }, [fetchLeaves]);
+
+  const showSuccess = (msg: string) => {
+    setSuccessBanner(msg);
+    setTimeout(() => setSuccessBanner(null), 4000);
+  };
+
+  const handleApplyLeave = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
+    if (!profile) return;
 
     if (!startDate || !endDate) {
       setFormError('Please select both start and end dates.');
@@ -50,248 +85,301 @@ export const TimeOffPage: React.FC = () => {
     }
 
     const diffDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+    setIsSubmitting(true);
 
-    const newReq: LeaveRequest = {
-      id: `l-${Date.now()}`,
-      user_id: profile?.id || 'u2',
-      company_id: profile?.company_id || 'c1',
-      leave_type: leaveType,
-      start_date: startDate,
-      end_date: endDate,
-      total_days: diffDays,
-      remarks,
-      status: 'pending',
-      hr_comments: null,
-      reviewed_by: null,
-      reviewed_at: null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      profile: {
-        first_name: profile?.first_name || 'John',
-        last_name: profile?.last_name || 'Doe',
-        emp_code: profile?.emp_code || 'EMP-002',
-        avatar_url: profile?.avatar_url || null,
-        department: profile?.department || 'Engineering',
-      },
-    };
+    try {
+      const { error: applyErr } = await leaveService.applyLeave({
+        userId: profile.id,
+        companyId: profile.company_id,
+        leaveType,
+        startDate,
+        endDate,
+        totalDays: diffDays,
+        remarks,
+      });
 
-    setLeaves([newReq, ...leaves]);
-    setIsApplyModalOpen(false);
-    setRemarks('');
-    setStartDate('');
-    setEndDate('');
+      if (applyErr) throw applyErr;
+
+      showSuccess(`Leave application for ${diffDays} days submitted to Supabase!`);
+      setIsApplyModalOpen(false);
+      setRemarks('');
+      setStartDate('');
+      setEndDate('');
+      await fetchLeaves();
+    } catch (err: any) {
+      console.error('Apply leave error:', err);
+      setFormError(err.message || 'Failed to submit leave request.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleHRAction = (status: 'approved' | 'rejected') => {
-    if (!reviewModalRequest) return;
-    setLeaves((prev) =>
-      prev.map((l) =>
-        l.id === reviewModalRequest.id
-          ? {
-              ...l,
-              status,
-              hr_comments: hrComment || (status === 'approved' ? 'Approved' : 'Rejected'),
-              reviewed_by: profile?.id || null,
-              reviewed_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            }
-          : l
-      )
-    );
-    setReviewModalRequest(null);
-    setHrComment('');
+  const handleHRAction = async (status: LeaveStatus) => {
+    if (!reviewModalRequest || !profile) return;
+    setIsReviewing(true);
+
+    try {
+      const { error: revErr } = await leaveService.reviewLeave(
+        reviewModalRequest.id,
+        status,
+        profile.id,
+        hrComment || (status === 'approved' ? 'Approved by HR' : 'Rejected by HR')
+      );
+
+      if (revErr) throw revErr;
+
+      showSuccess(
+        `Leave marked ${status.toUpperCase()}. Postgres trigger synchronized attendance records.`
+      );
+      setReviewModalRequest(null);
+      setHrComment('');
+      await Promise.all([fetchLeaves(), refreshAttendance()]);
+    } catch (err: any) {
+      alert('Review action failed: ' + err.message);
+    } finally {
+      setIsReviewing(false);
+    }
   };
 
-  const columns: Column<LeaveRequest>[] = [
+  // Quota computations
+  const paidApproved = leaves
+    .filter((l) => l.leave_type === 'paid' && l.status === 'approved')
+    .reduce((sum, l) => sum + (l.total_days || 0), 0);
+
+  const sickApproved = leaves
+    .filter((l) => l.leave_type === 'sick' && l.status === 'approved')
+    .reduce((sum, l) => sum + (l.total_days || 0), 0);
+
+  const unpaidApproved = leaves
+    .filter((l) => l.leave_type === 'unpaid' && l.status === 'approved')
+    .reduce((sum, l) => sum + (l.total_days || 0), 0);
+
+  const pendingCount = leaves.filter((l) => l.status === 'pending').length;
+
+  const leaveColumns: Column<LeaveRequest>[] = [
+    ...(!isEmployee
+      ? [
+          {
+            header: 'Employee',
+            cell: (row: LeaveRequest) => (
+              <div className="flex items-center gap-3">
+                <Avatar
+                  src={row.profile?.avatar_url}
+                  name={`${row.profile?.first_name || ''} ${row.profile?.last_name || ''}`}
+                  size="sm"
+                />
+                <div>
+                  <span className="font-semibold text-neutral-100 block text-xs">
+                    {row.profile?.first_name} {row.profile?.last_name}
+                  </span>
+                  <span className="text-[10px] text-neutral-400 font-mono">
+                    {row.profile?.emp_code || 'EMP'} • {row.profile?.department || 'General'}
+                  </span>
+                </div>
+              </div>
+            ),
+          },
+        ]
+      : []),
     {
-      header: 'Employee',
-      cell: (row) => (
-        <div className="flex items-center gap-3">
-          <Avatar
-            src={row.profile?.avatar_url}
-            name={`${row.profile?.first_name} ${row.profile?.last_name}`}
-            size="sm"
-          />
-          <div>
-            <p className="font-medium text-neutral-100">
-              {row.profile?.first_name} {row.profile?.last_name}
-            </p>
-            <p className="text-[11px] font-mono text-neutral-500">{row.profile?.department}</p>
-          </div>
+      header: 'Type',
+      cell: (row: LeaveRequest) => <Badge variant={row.leave_type} />,
+    },
+    {
+      header: 'Period (From - To)',
+      cell: (row: LeaveRequest) => (
+        <div className="text-xs text-neutral-200 flex items-center gap-1.5 font-medium">
+          <Calendar className="w-3.5 h-3.5 text-neutral-500" />
+          <span>{formatDate(row.start_date)}</span>
+          <span className="text-neutral-500">→</span>
+          <span>{formatDate(row.end_date)}</span>
         </div>
       ),
     },
     {
-      header: 'Leave Type',
-      cell: (row) => (
-        <span className="capitalize font-medium text-xs text-neutral-300">
-          {row.leave_type} Leave
+      header: 'Days',
+      cell: (row: LeaveRequest) => (
+        <span className="font-mono font-semibold text-xs text-neutral-200">
+          {row.total_days} {row.total_days === 1 ? 'day' : 'days'}
         </span>
       ),
     },
     {
-      header: 'Date Range',
-      cell: (row) => (
-        <div>
-          <p className="text-xs font-medium text-neutral-200">
-            {formatDate(row.start_date)} &rarr; {formatDate(row.end_date)}
-          </p>
-          <p className="text-[11px] text-neutral-500">{row.total_days} Day(s)</p>
-        </div>
-      ),
-    },
-    {
-      header: 'Remarks & Comments',
-      cell: (row) => (
-        <div className="max-w-xs text-xs space-y-1">
-          <p className="text-neutral-300 italic truncate">"{row.remarks || 'No remarks'}"</p>
-          {row.hr_comments && (
-            <p className="text-[11px] text-purple-400">
-              HR: {row.hr_comments}
-            </p>
-          )}
-        </div>
+      header: 'Remarks',
+      cell: (row: LeaveRequest) => (
+        <span className="text-xs text-neutral-400 max-w-[180px] truncate block">
+          {row.remarks || '—'}
+        </span>
       ),
     },
     {
       header: 'Status',
-      cell: (row) => <Badge variant={row.status} />,
+      cell: (row: LeaveRequest) => <Badge variant={row.status} />,
     },
     {
-      header: 'Actions',
-      align: 'right',
-      cell: (row) => {
-        if (role === 'admin' && row.status === 'pending') {
-          return (
-            <div className="flex items-center justify-end gap-1.5">
-              <Button
-                variant="primary"
-                size="sm"
-                className="bg-emerald-600 hover:bg-emerald-500 px-2 py-1 text-xs"
-                onClick={() => setReviewModalRequest(row)}
-              >
-                Review
-              </Button>
-            </div>
-          );
-        }
-        return <span className="text-xs text-neutral-500">—</span>;
-      },
+      header: 'HR Notes',
+      cell: (row: LeaveRequest) => (
+        <span className="text-xs text-neutral-400 max-w-[160px] truncate block">
+          {row.hr_comments || '—'}
+        </span>
+      ),
     },
+    ...(!isEmployee
+      ? [
+          {
+            header: 'Actions',
+            cell: (row: LeaveRequest) =>
+              row.status === 'pending' ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setReviewModalRequest(row);
+                    setHrComment('');
+                  }}
+                  className="py-1 text-xs text-purple-400 border-purple-800/60 hover:bg-purple-950/40"
+                >
+                  Review
+                </Button>
+              ) : (
+                <span className="text-[11px] text-neutral-500 font-medium">Completed</span>
+              ),
+          },
+        ]
+      : []),
   ];
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
-      {/* Header & Controls */}
+      {/* Top Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
-            Time Off & Leave Management
+            Time Off & Leaves
           </h1>
           <p className="text-xs sm:text-sm text-neutral-400 mt-0.5">
-            Submit leave requests, review pending time-off, and track balances
+            Apply for paid or sick leaves, track quota balances, and review team requests
           </p>
         </div>
 
         <Button
           variant="primary"
-          size="sm"
-          leftIcon={<Plus className="w-4 h-4" />}
           onClick={() => setIsApplyModalOpen(true)}
+          leftIcon={<Plus className="w-4 h-4" />}
         >
           Apply for Leave
         </Button>
       </div>
 
-      {/* Summary KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <Card hoverEffect className="p-4 flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-            <Plane className="w-5 h-5" />
+      {successBanner && (
+        <div className="p-3.5 bg-emerald-950/50 border border-emerald-800/60 rounded-xl flex items-center gap-2.5 text-xs text-emerald-300 shadow-lg">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+          <span>{successBanner}</span>
+        </div>
+      )}
+
+      {/* Quota KPI Cards Overview */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card className="p-4 bg-neutral-900/80 border-neutral-800">
+          <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block">
+            Paid Leave Balance
+          </span>
+          <div className="text-2xl font-extrabold text-blue-400 mt-1">
+            {Math.max(0, 12 - paidApproved)} <span className="text-xs font-normal text-neutral-400">days left</span>
           </div>
-          <div>
-            <p className="text-xs text-neutral-400 font-medium uppercase">Paid Leave Balance</p>
-            <h3 className="text-2xl font-bold text-emerald-400 mt-0.5">12 Days</h3>
-          </div>
+          <span className="text-[10px] text-neutral-500 mt-0.5 block">
+            {paidApproved} / 12 days utilized
+          </span>
         </Card>
 
-        <Card hoverEffect className="p-4 flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-sky-500/10 text-sky-400 border border-sky-500/20">
-            <Calendar className="w-5 h-5" />
+        <Card className="p-4 bg-neutral-900/80 border-neutral-800">
+          <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block">
+            Sick Leave Balance
+          </span>
+          <div className="text-2xl font-extrabold text-emerald-400 mt-1">
+            {Math.max(0, 8 - sickApproved)} <span className="text-xs font-normal text-neutral-400">days left</span>
           </div>
-          <div>
-            <p className="text-xs text-neutral-400 font-medium uppercase">Sick Leave Balance</p>
-            <h3 className="text-2xl font-bold text-sky-400 mt-0.5">7 Days</h3>
-          </div>
+          <span className="text-[10px] text-neutral-500 mt-0.5 block">
+            {sickApproved} / 8 days utilized
+          </span>
         </Card>
 
-        <Card hoverEffect className="p-4 flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
-            <MessageSquare className="w-5 h-5" />
+        <Card className="p-4 bg-neutral-900/80 border-neutral-800">
+          <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block">
+            Unpaid Leaves Taken
+          </span>
+          <div className="text-2xl font-extrabold text-amber-400 mt-1">
+            {unpaidApproved} <span className="text-xs font-normal text-neutral-400">days</span>
           </div>
-          <div>
-            <p className="text-xs text-neutral-400 font-medium uppercase">Requests in Review</p>
-            <h3 className="text-2xl font-bold text-purple-300 mt-0.5">
-              {leaves.filter((l) => l.status === 'pending').length}
-            </h3>
-          </div>
+          <span className="text-[10px] text-neutral-500 mt-0.5 block">
+            Deducted via Loss of Pay
+          </span>
+        </Card>
+
+        <Card className="p-4 bg-neutral-900/80 border-neutral-800">
+          <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block">
+            Pending Approvals
+          </span>
+          <div className="text-2xl font-extrabold text-purple-400 mt-1">{pendingCount}</div>
+          <span className="text-[10px] text-neutral-500 mt-0.5 block">
+            Awaiting HR review
+          </span>
         </Card>
       </div>
 
       {/* Leave Requests Table */}
-      <Table
-        columns={columns}
-        data={displayedLeaves}
-        keyExtractor={(row) => row.id}
-        emptyMessage="No leave requests found."
-      />
+      <Card className="bg-neutral-900/80 border-neutral-800 overflow-hidden">
+        {isLoading ? (
+          <LoadingState message="Loading leave records from Supabase..." />
+        ) : error ? (
+          <ErrorState message={error} onRetry={fetchLeaves} />
+        ) : leaves.length === 0 ? (
+          <EmptyState
+            title="No leave requests found"
+            description="You have not submitted any time off applications yet."
+            actionLabel="Apply for Leave"
+            onAction={() => setIsApplyModalOpen(true)}
+          />
+        ) : (
+          <Table columns={leaveColumns} data={leaves} />
+        )}
+      </Card>
 
-      {/* Modal: Apply for Leave */}
+      {/* Apply Leave Modal */}
       <Modal
         isOpen={isApplyModalOpen}
         onClose={() => setIsApplyModalOpen(false)}
-        title="Apply for Leave"
-        description="Submit a time-off application for HR review."
-        footer={
-          <>
-            <Button variant="outline" size="sm" onClick={() => setIsApplyModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button variant="primary" size="sm" onClick={handleApplyLeave}>
-              Submit Request
-            </Button>
-          </>
-        }
+        title="Apply for Time Off / Leave"
       >
         <form onSubmit={handleApplyLeave} className="space-y-4">
           {formError && (
-            <div className="p-3 bg-rose-950/40 border border-rose-800/50 rounded-xl flex items-center gap-2 text-xs text-rose-300">
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            <div className="p-3 bg-red-950/40 border border-red-800/50 rounded-lg text-xs text-red-300 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
               <span>{formError}</span>
             </div>
           )}
 
           <Select
-            label="Leave Type"
+            label="Leave Type *"
             value={leaveType}
             onChange={(e) => setLeaveType(e.target.value as LeaveType)}
             options={[
-              { label: 'Paid Leave / Casual Leave', value: 'paid' },
-              { label: 'Sick Leave / Medical', value: 'sick' },
-              { label: 'Unpaid Leave (Loss of Pay)', value: 'unpaid' },
+              { value: 'paid', label: 'Paid Annual Leave (Quota: 12 days)' },
+              { value: 'sick', label: 'Sick / Medical Leave (Quota: 8 days)' },
+              { value: 'unpaid', label: 'Unpaid Leave (Loss of Pay)' },
             ]}
           />
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input
-              label="Start Date"
+              label="Start Date *"
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
               required
             />
             <Input
-              label="End Date"
+              label="End Date *"
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
@@ -299,82 +387,105 @@ export const TimeOffPage: React.FC = () => {
             />
           </div>
 
-          <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-neutral-300">Remarks / Reason</label>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-semibold text-neutral-300">
+              Reason / Remarks *
+            </label>
             <textarea
               rows={3}
               value={remarks}
               onChange={(e) => setRemarks(e.target.value)}
-              placeholder="Provide a brief explanation for your leave..."
-              className="w-full bg-neutral-950 text-neutral-200 text-sm p-3 rounded-lg border border-neutral-800 focus:border-purple-500 focus:outline-none"
+              placeholder="State the reason for your time off request..."
+              required
+              className="w-full bg-neutral-950/80 border border-neutral-800 rounded-xl p-3 text-xs text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-purple-500 resize-none"
             />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t border-neutral-800">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIsApplyModalOpen(false)}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" isLoading={isSubmitting}>
+              Submit Application
+            </Button>
           </div>
         </form>
       </Modal>
 
-      {/* Modal: HR Review Request */}
-      <Modal
-        isOpen={Boolean(reviewModalRequest)}
-        onClose={() => setReviewModalRequest(null)}
-        title="Review Leave Application"
-        description="Approve or reject employee leave with optional comments."
-        footer={
-          <div className="flex items-center justify-between w-full">
-            <Button
-              variant="danger"
-              size="sm"
-              leftIcon={<X className="w-3.5 h-3.5" />}
-              onClick={() => handleHRAction('rejected')}
-            >
-              Reject Request
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              className="bg-emerald-600 hover:bg-emerald-500"
-              leftIcon={<Check className="w-3.5 h-3.5" />}
-              onClick={() => handleHRAction('approved')}
-            >
-              Approve Request
-            </Button>
-          </div>
-        }
-      >
-        {reviewModalRequest && (
+      {/* Admin Review Modal */}
+      {reviewModalRequest && (
+        <Modal
+          isOpen={Boolean(reviewModalRequest)}
+          onClose={() => setReviewModalRequest(null)}
+          title="Review Employee Leave Request"
+        >
           <div className="space-y-4">
-            <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800 space-y-1.5 text-xs">
-              <p className="text-neutral-400">
-                Applicant:{' '}
-                <span className="font-semibold text-neutral-200">
+            <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-2 text-xs">
+              <div className="flex justify-between pb-1 border-b border-neutral-800">
+                <span className="text-neutral-400">Employee:</span>
+                <span className="text-neutral-200 font-semibold">
                   {reviewModalRequest.profile?.first_name} {reviewModalRequest.profile?.last_name}
                 </span>
-              </p>
-              <p className="text-neutral-400">
-                Period:{' '}
-                <span className="text-neutral-200">
-                  {formatDate(reviewModalRequest.start_date)} to{' '}
-                  {formatDate(reviewModalRequest.end_date)} ({reviewModalRequest.total_days} Days)
+              </div>
+              <div className="flex justify-between pb-1 border-b border-neutral-800">
+                <span className="text-neutral-400">Leave Type:</span>
+                <Badge variant={reviewModalRequest.leave_type} />
+              </div>
+              <div className="flex justify-between pb-1 border-b border-neutral-800">
+                <span className="text-neutral-400">Duration:</span>
+                <span className="font-mono text-purple-400 font-bold">
+                  {reviewModalRequest.total_days} days ({formatDate(reviewModalRequest.start_date)} → {formatDate(reviewModalRequest.end_date)})
                 </span>
-              </p>
-              <p className="text-neutral-400">
-                Reason:{' '}
-                <span className="text-neutral-200 italic">"{reviewModalRequest.remarks}"</span>
-              </p>
+              </div>
+              <div>
+                <span className="text-neutral-400 block mb-1">Employee Remarks:</span>
+                <p className="text-neutral-300 italic bg-neutral-900 p-2.5 rounded-lg">
+                  "{reviewModalRequest.remarks || 'No remarks provided'}"
+                </p>
+              </div>
             </div>
 
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-neutral-300">HR Feedback Comment</label>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-neutral-300">
+                HR Review Comments
+              </label>
               <textarea
                 rows={2}
                 value={hrComment}
                 onChange={(e) => setHrComment(e.target.value)}
-                placeholder="Optional feedback for employee..."
-                className="w-full bg-neutral-950 text-neutral-200 text-sm p-3 rounded-lg border border-neutral-800 focus:border-purple-500 focus:outline-none"
+                placeholder="Optional feedback or approval notes..."
+                className="w-full bg-neutral-950/80 border border-neutral-800 rounded-xl p-3 text-xs text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-purple-500 resize-none"
               />
             </div>
+
+            <div className="flex justify-end gap-3 pt-4 border-t border-neutral-800">
+              <Button
+                type="button"
+                variant="danger"
+                onClick={() => handleHRAction('rejected')}
+                isLoading={isReviewing}
+                leftIcon={<X className="w-4 h-4" />}
+              >
+                Reject Request
+              </Button>
+              <Button
+                type="button"
+                variant="success"
+                onClick={() => handleHRAction('approved')}
+                isLoading={isReviewing}
+                leftIcon={<Check className="w-4 h-4" />}
+              >
+                Approve Leave
+              </Button>
+            </div>
           </div>
-        )}
-      </Modal>
+        </Modal>
+      )}
     </div>
   );
 };
