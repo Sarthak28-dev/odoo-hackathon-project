@@ -1,14 +1,16 @@
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { AttendanceRecord } from '../types';
-import { mockAttendanceRecords } from '../services/mockData';
+import { attendanceService } from '../services/attendanceService';
 import { useAuth } from './AuthContext';
 
 interface AttendanceContextType {
   isCheckedIn: boolean;
   checkInTime: string | null;
   records: AttendanceRecord[];
+  isLoading: boolean;
   checkIn: () => Promise<void>;
   checkOut: () => Promise<void>;
+  refreshAttendance: () => Promise<void>;
   currentMonthSummary: {
     daysPresent: number;
     leavesCount: number;
@@ -19,10 +21,32 @@ interface AttendanceContextType {
 const AttendanceContext = createContext<AttendanceContextType | undefined>(undefined);
 
 export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { profile } = useAuth();
-  const [records, setRecords] = useState<AttendanceRecord[]>(mockAttendanceRecords);
+  const { profile, role } = useAuth();
+  const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
 
-  // Determine if the current active user is checked in today
+  const refreshAttendance = useCallback(async () => {
+    if (!profile) return;
+    setIsLoading(true);
+    try {
+      // If admin, fetch all company records for reporting; if employee, fetch own
+      const targetUserId = role === 'employee' ? profile.id : undefined;
+      const { data } = await attendanceService.getAttendanceRecords(targetUserId);
+      if (data) {
+        setRecords(data);
+      }
+    } catch (err) {
+      console.error('Failed to load attendance records:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [profile, role]);
+
+  useEffect(() => {
+    refreshAttendance();
+  }, [refreshAttendance]);
+
+  // Determine if current user is checked in today
   const todayStr = new Date().toISOString().split('T')[0];
   const userTodayRecord = records.find(
     (r) => r.user_id === profile?.id && r.date === todayStr
@@ -33,76 +57,46 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   const checkIn = async () => {
     if (!profile) return;
-    const nowIso = new Date().toISOString();
-    
-    if (userTodayRecord) {
-      setRecords((prev) =>
-        prev.map((r) =>
-          r.id === userTodayRecord.id
-            ? { ...r, check_in: nowIso, check_out: null, status: 'present' }
-            : r
-        )
-      );
-    } else {
-      const newRecord: AttendanceRecord = {
-        id: `att-${Date.now()}`,
-        user_id: profile.id,
-        company_id: profile.company_id,
-        date: todayStr,
-        check_in: nowIso,
-        check_out: null,
-        work_hours: 0.0,
-        extra_hours: 0.0,
-        status: 'present',
-        created_at: nowIso,
-        updated_at: nowIso,
-        profile: {
-          first_name: profile.first_name,
-          last_name: profile.last_name,
-          emp_code: profile.emp_code,
-          avatar_url: profile.avatar_url,
-        },
-      };
-      setRecords((prev) => [newRecord, ...prev]);
+    setIsLoading(true);
+    try {
+      const { error } = await attendanceService.checkIn(profile.id, profile.company_id);
+      if (error) {
+        alert('Check-in failed: ' + error.message);
+      }
+      await refreshAttendance();
+    } catch (err: any) {
+      console.error('Check-in error:', err);
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const checkOut = async () => {
-    if (!profile || !userTodayRecord?.check_in) return;
-    const nowIso = new Date().toISOString();
-    const checkInDate = new Date(userTodayRecord.check_in);
-    const checkOutDate = new Date(nowIso);
-    const diffHours = Math.max(
-      0,
-      Number(((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60)).toFixed(2))
-    );
-    const extra = Math.max(0, Number((diffHours - 8.0).toFixed(2)));
-
-    setRecords((prev) =>
-      prev.map((r) =>
-        r.id === userTodayRecord.id
-          ? {
-              ...r,
-              check_out: nowIso,
-              work_hours: diffHours,
-              extra_hours: extra,
-              status: diffHours >= 4.5 ? 'present' : 'half_day',
-              updated_at: nowIso,
-            }
-          : r
-      )
-    );
+    if (!profile || !userTodayRecord) return;
+    setIsLoading(true);
+    try {
+      const { error } = await attendanceService.checkOut(userTodayRecord.id);
+      if (error) {
+        alert('Check-out failed: ' + error.message);
+      }
+      await refreshAttendance();
+    } catch (err: any) {
+      console.error('Check-out error:', err);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // Month stats for active profile
+  // Monthly metrics for the user
   const userMonthRecords = records.filter(
     (r) => r.user_id === profile?.id && r.date.startsWith(todayStr.slice(0, 7))
   );
+
   const daysPresent = userMonthRecords.filter(
     (r) => r.status === 'present' || r.status === 'half_day'
   ).length;
+
   const leavesCount = userMonthRecords.filter((r) => r.status === 'on_leave').length;
-  const totalWorkingDays = 22;
 
   return (
     <AttendanceContext.Provider
@@ -110,12 +104,14 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         isCheckedIn,
         checkInTime,
         records,
+        isLoading,
         checkIn,
         checkOut,
+        refreshAttendance,
         currentMonthSummary: {
-          daysPresent: daysPresent || 18,
-          leavesCount: leavesCount || 1,
-          totalWorkingDays,
+          daysPresent,
+          leavesCount,
+          totalWorkingDays: 22,
         },
       }}
     >
